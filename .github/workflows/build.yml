@@ -1,43 +1,533 @@
 name: Build Ismail4G APK
-on:
-  workflow_dispatch:
-  push:
-    branches: [ main ]
-permissions:
-  contents: read
+on: [workflow_dispatch, push]
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '8.9'
-      - name: Accept Android SDK licenses and install SDK
+          gradle-version: '8.5'
+
+      - name: Generate Source Tree
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-      - name: Extract intended project ZIP
-        run: |
-          ZIP_FILE="Ismail4G-Android-Project.zip"
-          test -f "$ZIP_FILE" || { echo "Missing $ZIP_FILE"; exit 1; }
-          unzip -o "$ZIP_FILE" -d extracted
-      - name: Find and build Android project
-        run: |
-          PROJECT_FILE="$(find extracted -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
-          test -n "$PROJECT_FILE" || { echo "No settings.gradle or settings.gradle.kts found in selected ZIP"; exit 1; }
-          PROJECT_DIR="$(dirname "$PROJECT_FILE")"
-          cd "$PROJECT_DIR"
-          gradle --no-daemon assembleDebug
-      - uses: actions/upload-artifact@v4
+          mkdir -p app/src/main/java/com/yemennet/yemen4g
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+
+          cat << 'EOF' > settings.gradle
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = "Ismail4G"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins { id 'com.android.application' version '8.2.2' apply false }
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.yemennet.yemen4g'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.yemennet.yemen4g"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+              implementation 'androidx.cardview:cardview:1.0.0'
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <application
+                  android:allowBackup="false"
+                  android:label="إسماعيل فورجي 4G"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar"
+                  android:usesCleartextTraffic="false">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <activity android:name=".ResultActivity" android:exported="false" />
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/yemennet/yemen4g/YemenNetEngine.java
+          package com.yemennet.yemen4g;
+
+          import android.annotation.SuppressLint;
+          import android.content.Context;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.net.http.SslError;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.util.Base64;
+          import android.webkit.CookieManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.SslErrorHandler;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import org.json.JSONObject;
+
+          public class YemenNetEngine {
+              private static final String TARGET_URL = "https://svc.ptc.gov.ye/4g/";
+              private final Context context;
+              private WebView webView;
+              private EngineListener listener;
+
+              private enum Step { IDLE, INITIAL_LOAD, QUERY_SUBMITTED }
+              private Step currentStep = Step.IDLE;
+              private String targetModemNumber = "";
+
+              public interface EngineListener {
+                  void onCaptchaReceived(Bitmap bitmap);
+                  void onQuerySuccess(String modem, String dataBalance, String pkgName, String expiry);
+                  void onError(String message);
+              }
+
+              public YemenNetEngine(Context ctx) {
+                  this.context = ctx;
+                  setupWebView();
+              }
+
+              @SuppressLint("SetJavaScriptEnabled")
+              private void setupWebView() {
+                  webView = new WebView(context);
+                  WebSettings s = webView.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setCacheMode(WebSettings.LOAD_NO_CACHE);
+                  s.setUserAgentString("Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36");
+
+                  CookieManager.getInstance().setAcceptCookie(true);
+                  CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
+
+                  webView.addJavascriptInterface(new JSBridge(), "AndroidBridge");
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
+                          h.cancel();
+                          postError("فشل الاتصال: خطأ أمني في شهادة SSL لموقع يمن نت (" + e.getPrimaryError() + ")");
+                      }
+
+                      @Override
+                      public void onReceivedError(WebView v, int errorCode, String description, String failingUrl) {
+                          postError("تعذر الاتصال بخدمة يمن نت: " + description);
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView v, String url) {
+                          if (currentStep == Step.INITIAL_LOAD) {
+                              extractCaptcha();
+                          } else if (currentStep == Step.QUERY_SUBMITTED) {
+                              parseQueryResult();
+                          }
+                      }
+                  });
+              }
+
+              public void startNewSession(EngineListener l) {
+                  this.listener = l;
+                  this.currentStep = Step.INITIAL_LOAD;
+                  this.targetModemNumber = "";
+                  webView.loadUrl(TARGET_URL);
+              }
+
+              private void extractCaptcha() {
+                  String js = "javascript:(function() {" +
+                          "   var img = document.querySelector('img[src*=\"captcha\" i], img[id*=\"captcha\" i], #imgCaptcha');" +
+                          "   if (!img) {" +
+                          "       var imgs = document.getElementsByTagName('img');" +
+                          "       if (imgs.length > 0) img = imgs[0];" +
+                          "   }" +
+                          "   if (img && img.naturalWidth > 0) {" +
+                          "       var canvas = document.createElement('canvas');" +
+                          "       canvas.width = img.naturalWidth;" +
+                          "       canvas.height = img.naturalHeight;" +
+                          "       var ctx = canvas.getContext('2d');" +
+                          "       ctx.drawImage(img, 0, 0);" +
+                          "       var dataURL = canvas.toDataURL('image/png').replace(/^data:image\\/png;base64,/, '');" +
+                          "       AndroidBridge.sendCaptcha(dataURL);" +
+                          "   } else {" +
+                          "       AndroidBridge.sendError('لم يتم العثور على صورة رمز التحقق في صفحة يمن نت');" +
+                          "   }" +
+                          "})()";
+                  webView.evaluateJavascript(js, null);
+              }
+
+              public void submitQuery(String modem, String captchaCode) {
+                  this.currentStep = Step.QUERY_SUBMITTED;
+                  this.targetModemNumber = modem;
+
+                  String js = "javascript:(function() {" +
+                          "   var numInp = document.querySelector('input[name*=\"phone\" i], input[id*=\"phone\" i], input[name*=\"number\" i], input[type=\"text\"]');" +
+                          "   var codeInp = document.querySelector('input[name*=\"code\" i], input[id*=\"code\" i], input[name*=\"captcha\" i], input[autocomplete=\"off\"]');" +
+                          "   var btn = document.querySelector('button[type=\"submit\"], input[type=\"submit\"], button');" +
+                          "   if (numInp && codeInp && btn) {" +
+                          "       numInp.value = '" + modem + "';" +
+                          "       numInp.dispatchEvent(new Event('input', { bubbles: true }));" +
+                          "       numInp.dispatchEvent(new Event('change', { bubbles: true }));" +
+                          "       codeInp.value = '" + captchaCode + "';" +
+                          "       codeInp.dispatchEvent(new Event('input', { bubbles: true }));" +
+                          "       codeInp.dispatchEvent(new Event('change', { bubbles: true }));" +
+                          "       btn.click();" +
+                          "   } else {" +
+                          "       AndroidBridge.sendError('عناصر الإدخال غير مطابقة في صفحة الخدمة');" +
+                          "   }" +
+                          "})()";
+                  webView.evaluateJavascript(js, null);
+              }
+
+              private void parseQueryResult() {
+                  String js = "javascript:(function() {" +
+                          "   var text = document.body.innerText || '';" +
+                          "   if (text.includes('رمز التحقق غير صحيح') || text.includes('رمز كود خاطئ')) {" +
+                          "       AndroidBridge.sendError('رمز التحقق غير صحيح، يرجى إعادة المحاولة');" +
+                          "       return;" +
+                          "   }" +
+                          "   if (text.includes('الرقم غير صحيح') || text.includes('غير موجود') || text.includes('لا توجد بيانات')) {" +
+                          "       AndroidBridge.sendError('رقم المودم غير مسجل أو لا توجد له بيانات');" +
+                          "       return;" +
+                          "   }" +
+                          "   var dataVal = null;" +
+                          "   var pkgVal = null;" +
+                          "   var expVal = null;" +
+                          "   var nodes = document.querySelectorAll('td, span, div, p');" +
+                          "   for (var i = 0; i < nodes.length; i++) {" +
+                          "       var t = nodes[i].innerText.trim();" +
+                          "       if (!dataVal && (t.includes('ميجابايت') || t.includes('GB') || t.includes('MB') || t.includes('جيجابايت'))) {" +
+                          "           dataVal = t;" +
+                          "       }" +
+                          "       if (!expVal) {" +
+                          "           var m = t.match(/\\d{4}[-\\/]\\d{1,2}[-\\/]\\d{1,2}/);" +
+                          "           if (m) expVal = m[0];" +
+                          "       }" +
+                          "       if (!pkgVal && (t.includes('باقة') || t.includes('4G'))) {" +
+                          "           pkgVal = t;" +
+                          "       }" +
+                          "   }" +
+                          "   if (dataVal) {" +
+                          "       var out = { data: dataVal, pkg: (pkgVal || 'يمن فورجي'), exp: (expVal || 'غير محدد') };" +
+                          "       AndroidBridge.sendSuccess(JSON.stringify(out));" +
+                          "   } else {" +
+                          "       AndroidBridge.sendError('تعذر استخراج بيانات الرصيد من استجابة الموقع الرسمي');" +
+                          "   }" +
+                          "})()";
+                  webView.evaluateJavascript(js, null);
+              }
+
+              private void postError(String msg) {
+                  new Handler(Looper.getMainLooper()).post(() -> {
+                      if (listener != null) listener.onError(msg);
+                  });
+              }
+
+              private class JSBridge {
+                  @JavascriptInterface
+                  public void sendCaptcha(String b64) {
+                      new Handler(Looper.getMainLooper()).post(() -> {
+                          try {
+                              byte[] decoded = Base64.decode(b64, Base64.DEFAULT);
+                              Bitmap bmp = BitmapFactory.decodeByteArray(decoded, 0, decoded.length);
+                              if (bmp != null && listener != null) {
+                                  listener.onCaptchaReceived(bmp);
+                              } else {
+                                  postError("فشل تحويل صورة رمز التحقق المستلمة");
+                              }
+                          } catch (Exception e) {
+                              postError("خطأ أثناء معالجة رمز التحقق: " + e.getMessage());
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void sendSuccess(String jsonStr) {
+                      new Handler(Looper.getMainLooper()).post(() -> {
+                          try {
+                              JSONObject o = new JSONObject(jsonStr);
+                              String data = o.getString("data");
+                              String pkg = o.optString("pkg", "يمن فورجي");
+                              String exp = o.optString("exp", "غير محدد");
+                              if (listener != null) {
+                                  listener.onQuerySuccess(targetModemNumber, data, pkg, exp);
+                              }
+                          } catch (Exception e) {
+                              postError("فشل تحليل بيانات النتيجة المستلمة");
+                          }
+                      });
+                  }
+
+                  @JavascriptInterface
+                  public void sendError(String err) {
+                      postError(err);
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/yemennet/yemen4g/MainActivity.java
+          package com.yemennet.yemen4g;
+
+          import android.app.Dialog;
+          import android.content.Intent;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
+          import android.graphics.drawable.ColorDrawable;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.Window;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.ImageView;
+          import android.widget.ProgressBar;
+          import android.widget.Toast;
+          import androidx.appcompat.app.AppCompatActivity;
+
+          public class MainActivity extends AppCompatActivity implements YemenNetEngine.EngineListener {
+
+              private EditText etModem;
+              private Button btnQuery;
+              private ProgressBar progressBar;
+              private YemenNetEngine engine;
+              private Dialog captchaDialog;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_main);
+
+                  etModem = findViewById(R.id.etModem);
+                  btnQuery = findViewById(R.id.btnQuery);
+                  progressBar = findViewById(R.id.progressBar);
+
+                  engine = new YemenNetEngine(this);
+
+                  btnQuery.setOnClickListener(v -> {
+                      String modem = etModem.getText().toString().trim();
+                      if (modem.length() < 7) {
+                          Toast.makeText(this, "يرجى إدخال رقم المودم بصورة صحيحة", Toast.LENGTH_SHORT).show();
+                          return;
+                      }
+                      setLoading(true);
+                      engine.startNewSession(this);
+                  });
+              }
+
+              private void setLoading(boolean loading) {
+                  progressBar.setVisibility(loading ? View.VISIBLE : View.GONE);
+                  btnQuery.setEnabled(!loading);
+              }
+
+              @Override
+              public void onCaptchaReceived(Bitmap bitmap) {
+                  setLoading(false);
+                  showCaptchaDialog(bitmap);
+              }
+
+              private void showCaptchaDialog(Bitmap bitmap) {
+                  captchaDialog = new Dialog(this);
+                  captchaDialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                  captchaDialog.setContentView(R.layout.dialog_captcha);
+                  captchaDialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                  captchaDialog.setCancelable(true);
+
+                  ImageView iv = captchaDialog.findViewById(R.id.ivCaptcha);
+                  EditText et = captchaDialog.findViewById(R.id.etCaptcha);
+                  Button btn = captchaDialog.findViewById(R.id.btnSubmitCaptcha);
+                  ProgressBar pBar = captchaDialog.findViewById(R.id.dialogProgress);
+
+                  iv.setImageBitmap(bitmap);
+
+                  btn.setOnClickListener(v -> {
+                      String code = et.getText().toString().trim();
+                      if (code.isEmpty()) {
+                          Toast.makeText(this, "أدخل رمز التحقق", Toast.LENGTH_SHORT).show();
+                          return;
+                      }
+                      btn.setEnabled(false);
+                      pBar.setVisibility(View.VISIBLE);
+                      engine.submitQuery(etModem.getText().toString().trim(), code);
+                  });
+
+                  captchaDialog.show();
+              }
+
+              @Override
+              public void onQuerySuccess(String modem, String dataBalance, String pkgName, String expiry) {
+                  setLoading(false);
+                  if (captchaDialog != null && captchaDialog.isShowing()) {
+                      captchaDialog.dismiss();
+                  }
+                  Intent intent = new Intent(this, ResultActivity.class);
+                  intent.putExtra("modem", modem);
+                  intent.putExtra("data", dataBalance);
+                  intent.putExtra("pkg", pkgName);
+                  intent.putExtra("exp", expiry);
+                  startActivity(intent);
+              }
+
+              @Override
+              public void onError(String message) {
+                  setLoading(false);
+                  if (captchaDialog != null && captchaDialog.isShowing()) {
+                      captchaDialog.dismiss();
+                  }
+                  Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/yemennet/yemen4g/ResultActivity.java
+          package com.yemennet.yemen4g;
+
+          import android.os.Bundle;
+          import android.widget.Button;
+          import android.widget.TextView;
+          import androidx.appcompat.app.AppCompatActivity;
+
+          public class ResultActivity extends AppCompatActivity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_result);
+
+                  TextView tvModem = findViewById(R.id.tvModem);
+                  TextView tvData = findViewById(R.id.tvData);
+                  TextView tvPkg = findViewById(R.id.tvPkg);
+                  TextView tvExp = findViewById(R.id.tvExp);
+                  Button btnBack = findViewById(R.id.btnBack);
+
+                  tvModem.setText("رقم المودم: " + getIntent().getStringExtra("modem"));
+                  tvData.setText(getIntent().getStringExtra("data"));
+                  tvPkg.setText("الباقة: " + getIntent().getStringExtra("pkg"));
+                  tvExp.setText("تاريخ الانتهاء: " + getIntent().getStringExtra("exp"));
+
+                  btnBack.setOnClickListener(v -> finish());
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/res/layout/activity_main.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:background="#0A1128"
+              android:gravity="center"
+              android:padding="24dp">
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="إسماعيل فورجي 4G" android:textColor="#FFFFFF" android:textSize="24sp" android:textStyle="bold" />
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="تطوير: إسماعيل الجعماني • 733860587" android:textColor="#F59E0B" android:textSize="14sp" android:layout_marginTop="6dp"/>
+              <androidx.cardview.widget.CardView android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:layout_marginTop="32dp" app:cardBackgroundColor="#1C2541" app:cardCornerRadius="16dp">
+                  <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                      android:orientation="vertical" android:padding="20dp">
+                      <EditText android:id="@+id/etModem" android:layout_width="match_parent" android:layout_height="52dp"
+                          android:background="#111827" android:textColor="#FFFFFF" android:textColorHint="#9CA3AF"
+                          android:gravity="center" android:hint="أدخل رقم المودم (مثال: 103286773)" android:inputType="number" />
+                      <Button android:id="@+id/btnQuery" android:layout_width="match_parent" android:layout_height="52dp"
+                          android:layout_marginTop="16dp" android:backgroundTint="#10B981" android:text="استعلام عن الرصيد"
+                          android:textColor="#FFFFFF" android:textStyle="bold" />
+                      <ProgressBar android:id="@+id/progressBar" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:layout_gravity="center" android:layout_marginTop="12dp" android:visibility="gone"/>
+                  </LinearLayout>
+              </androidx.cardview.widget.CardView>
+          </LinearLayout>
+          EOF
+
+          cat << 'EOF' > app/src/main/res/layout/activity_result.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:background="#0A1128"
+              android:gravity="center"
+              android:padding="24dp">
+              <TextView android:id="@+id/tvModem" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:textColor="#06B6D4" android:textSize="18sp" android:textStyle="bold"/>
+              <androidx.cardview.widget.CardView android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:layout_marginTop="20dp" app:cardBackgroundColor="#064E3B" app:cardCornerRadius="16dp">
+                  <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                      android:orientation="vertical" android:padding="24dp" android:gravity="center">
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:text="الرصيد الفعلي المسترجع" android:textColor="#D1FAE5" android:textSize="14sp"/>
+                      <TextView android:id="@+id/tvData" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:textColor="#FFFFFF" android:textSize="28sp" android:textStyle="bold" android:layout_marginTop="8dp"/>
+                  </LinearLayout>
+              </androidx.cardview.widget.CardView>
+              <TextView android:id="@+id/tvPkg" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:textColor="#FFFFFF" android:textSize="16sp" android:layout_marginTop="16dp"/>
+              <TextView android:id="@+id/tvExp" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:textColor="#F59E0B" android:textSize="16sp" android:layout_marginTop="8dp"/>
+              <Button android:id="@+id/btnBack" android:layout_width="match_parent" android:layout_height="50dp"
+                  android:layout_marginTop="24dp" android:backgroundTint="#3B82F6" android:text="استعلام جديد" android:textColor="#FFFFFF"/>
+          </LinearLayout>
+          EOF
+
+          cat << 'EOF' > app/src/main/res/layout/dialog_captcha.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="wrap_content"
+              android:orientation="vertical"
+              android:background="#1E293B"
+              android:padding="20dp"
+              android:gravity="center">
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="رمز التحقق من خادم يمن نت" android:textColor="#FFFFFF" android:textSize="18sp" android:textStyle="bold"/>
+              <ImageView android:id="@+id/ivCaptcha" android:layout_width="160dp" android:layout_height="55dp"
+                  android:layout_marginTop="12dp" android:background="#FFFFFF"/>
+              <EditText android:id="@+id/etCaptcha" android:layout_width="match_parent" android:layout_height="48dp"
+                  android:layout_marginTop="12dp" android:background="#0F172A" android:textColor="#FFFFFF"
+                  android:gravity="center" android:hint="اكتب رمز التحقق" android:textColorHint="#94A3B8" android:inputType="number"/>
+              <ProgressBar android:id="@+id/dialogProgress" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:layout_marginTop="8dp" android:visibility="gone"/>
+              <Button android:id="@+id/btnSubmitCaptcha" android:layout_width="match_parent" android:layout_height="48dp"
+                  android:layout_marginTop="14dp" android:backgroundTint="#10B981" android:text="تأكيد وإرسال" android:textColor="#FFFFFF"/>
+          </LinearLayout>
+          EOF
+
+      - name: Build Debug APK
+        run: gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
-          name: Ismail4G-APK
-          path: extracted/**/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+          name: Ismail4G-v1.0-Debug
+          path: app/build/outputs/apk/debug/app-debug.apk
