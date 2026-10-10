@@ -301,82 +301,56 @@ jobs:
 
           cat << 'EOF' > app/src/main/java/com/yemennet/yemen4g/MainActivity.java
           package com.yemennet.yemen4g;
-
-          import android.annotation.SuppressLint;
+          import android.app.Dialog;
+          import android.content.Intent;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
+          import android.graphics.drawable.ColorDrawable;
           import android.os.Bundle;
           import android.view.View;
-          import android.webkit.WebChromeClient;
-          import android.webkit.WebResourceError;
-          import android.webkit.WebResourceRequest;
-          import android.webkit.WebSettings;
-          import android.webkit.WebView;
-          import android.webkit.WebViewClient;
+          import android.view.Window;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.ImageView;
           import android.widget.ProgressBar;
-          import android.widget.TextView;
+          import android.widget.Toast;
           import androidx.appcompat.app.AppCompatActivity;
-
-          public class MainActivity extends AppCompatActivity {
-              private static final String OFFICIAL_URL = "https://svc.ptc.gov.ye/4g/";
-              private WebView webView;
-              private ProgressBar progress;
-              private TextView status;
-
-              @SuppressLint("SetJavaScriptEnabled")
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
+          public class MainActivity extends AppCompatActivity implements YemenNetEngine.EngineListener {
+              private EditText etModem;
+              private Button btnQuery;
+              private ProgressBar progressBar;
+              private YemenNetEngine engine;
+              private Dialog captchaDialog;
+              @Override public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   setContentView(R.layout.activity_main);
-                  webView = findViewById(R.id.officialWebView);
-                  progress = findViewById(R.id.progressBar);
-                  status = findViewById(R.id.statusText);
-
-                  WebSettings settings = webView.getSettings();
-                  settings.setJavaScriptEnabled(true);
-                  settings.setDomStorageEnabled(true);
-                  settings.setLoadWithOverviewMode(true);
-                  settings.setUseWideViewPort(true);
-                  settings.setSupportZoom(true);
-                  settings.setBuiltInZoomControls(true);
-                  settings.setDisplayZoomControls(false);
-                  settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-
-                  android.webkit.CookieManager.getInstance().setAcceptCookie(true);
-                  android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
-                  webView.setWebChromeClient(new WebChromeClient() {
-                      @Override public void onProgressChanged(WebView view, int newProgress) {
-                          progress.setProgress(newProgress);
-                          progress.setVisibility(newProgress < 100 ? View.VISIBLE : View.GONE);
-                      }
+                  etModem=findViewById(R.id.etModem);
+                  btnQuery=findViewById(R.id.btnQuery);
+                  progressBar=findViewById(R.id.progressBar);
+                  engine=new YemenNetEngine(this);
+                  btnQuery.setOnClickListener(v -> {
+                      String modem=etModem.getText().toString().trim();
+                      if(modem.length()<7){Toast.makeText(this,"يرجى إدخال رقم المودم بصورة صحيحة",Toast.LENGTH_SHORT).show();return;}
+                      setLoading(true); engine.startNewSession(this);
                   });
-                  webView.setWebViewClient(new WebViewClient() {
-                      @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                          status.setText("جارٍ فتح خدمة يمن نت الرسمية…");
-                          status.setVisibility(View.VISIBLE);
-                      }
-                      @Override public void onPageFinished(WebView view, String url) {
-                          status.setVisibility(View.GONE);
-                      }
-                      @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                          if (request.isForMainFrame()) status.setText("تعذر تحميل الخدمة. تحقق من الإنترنت ثم اضغط تحديث الصفحة.");
-                      }
-                  });
-                  findViewById(R.id.reloadButton).setOnClickListener(v -> webView.reload());
-                  webView.loadUrl(OFFICIAL_URL);
               }
-
-              @Override public void onBackPressed() {
-                  if (webView != null && webView.canGoBack()) webView.goBack();
-                  else super.onBackPressed();
+              private void setLoading(boolean loading){progressBar.setVisibility(loading?View.VISIBLE:View.GONE);btnQuery.setEnabled(!loading);}
+              @Override public void onCaptchaReceived(Bitmap bitmap){setLoading(false);showCaptchaDialog(bitmap);}
+              private void showCaptchaDialog(Bitmap bitmap){
+                  captchaDialog=new Dialog(this);captchaDialog.requestWindowFeature(Window.FEATURE_NO_TITLE);captchaDialog.setContentView(R.layout.dialog_captcha);
+                  if(captchaDialog.getWindow()!=null)captchaDialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                  captchaDialog.setCancelable(true);
+                  ImageView iv=captchaDialog.findViewById(R.id.ivCaptcha);EditText et=captchaDialog.findViewById(R.id.etCaptcha);
+                  Button btn=captchaDialog.findViewById(R.id.btnSubmitCaptcha);ProgressBar pBar=captchaDialog.findViewById(R.id.dialogProgress);iv.setImageBitmap(bitmap);
+                  btn.setOnClickListener(v->{String code=et.getText().toString().trim();if(code.isEmpty()){Toast.makeText(this,"أدخل رمز التحقق",Toast.LENGTH_SHORT).show();return;}
+                      btn.setEnabled(false);pBar.setVisibility(View.VISIBLE);engine.submitQuery(etModem.getText().toString().trim(),code);});
+                  captchaDialog.show();
               }
-
-              @Override protected void onDestroy() {
-                  if (webView != null) {
-                      webView.stopLoading();
-                      webView.destroy();
-                      webView = null;
-                  }
-                  super.onDestroy();
+              @Override public void onQuerySuccess(String modem,String dataBalance,String pkgName,String expiry){
+                  setLoading(false);if(captchaDialog!=null&&captchaDialog.isShowing())captchaDialog.dismiss();
+                  Intent i=new Intent(this,ResultActivity.class);i.putExtra("modem",modem);i.putExtra("data",dataBalance);i.putExtra("pkg",pkgName);i.putExtra("exp",expiry);startActivity(i);
               }
+              @Override public void onError(String message){setLoading(false);if(captchaDialog!=null&&captchaDialog.isShowing())captchaDialog.dismiss();Toast.makeText(this,message,Toast.LENGTH_LONG).show();}
           }
           EOF
 
@@ -412,70 +386,26 @@ jobs:
 
           cat << 'EOF' > app/src/main/res/layout/activity_main.xml
           <?xml version="1.0" encoding="utf-8"?>
-          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-              android:layout_width="match_parent"
-              android:layout_height="match_parent"
-              android:orientation="vertical"
-              android:background="#0A1128">
-              <LinearLayout
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:orientation="horizontal"
-                  android:gravity="center_vertical"
-                  android:paddingStart="16dp"
-                  android:paddingEnd="12dp"
-                  android:paddingTop="10dp"
-                  android:paddingBottom="10dp"
-                  android:background="#111827">
-                  <LinearLayout
-                      android:layout_width="0dp"
-                      android:layout_height="wrap_content"
-                      android:layout_weight="1"
-                      android:orientation="vertical">
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:text="إسماعيل فورجي 4G"
-                          android:textColor="#FFFFFF"
-                          android:textSize="18sp"
-                          android:textStyle="bold"/>
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:text="استعلام مباشر من خدمة يمن نت الرسمية"
-                          android:textColor="#A7F3D0"
-                          android:textSize="12sp"/>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical"
+              android:background="#0A1128" android:gravity="center" android:padding="24dp">
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="إسماعيل فورجي 4G"
+                  android:textColor="#FFFFFF" android:textSize="24sp" android:textStyle="bold" />
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="تطوير: إسماعيل الجعماني • 733860587" android:textColor="#F59E0B" android:textSize="14sp" android:layout_marginTop="6dp"/>
+              <androidx.cardview.widget.CardView android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:layout_marginTop="32dp" app:cardBackgroundColor="#1C2541" app:cardCornerRadius="16dp">
+                  <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="20dp">
+                      <EditText android:id="@+id/etModem" android:layout_width="match_parent" android:layout_height="52dp"
+                          android:background="#111827" android:textColor="#FFFFFF" android:textColorHint="#9CA3AF" android:gravity="center"
+                          android:hint="أدخل رقم المودم (مثال: 103286773)" android:inputType="number" />
+                      <Button android:id="@+id/btnQuery" android:layout_width="match_parent" android:layout_height="52dp"
+                          android:layout_marginTop="16dp" android:backgroundTint="#10B981" android:text="استعلام عن الرصيد"
+                          android:textColor="#FFFFFF" android:textStyle="bold" />
+                      <ProgressBar android:id="@+id/progressBar" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:layout_gravity="center" android:layout_marginTop="12dp" android:visibility="gone"/>
                   </LinearLayout>
-                  <Button
-                      android:id="@+id/reloadButton"
-                      android:layout_width="wrap_content"
-                      android:layout_height="44dp"
-                      android:text="تحديث"
-                      android:textColor="#FFFFFF"
-                      android:backgroundTint="#047857"/>
-              </LinearLayout>
-              <ProgressBar
-                  android:id="@+id/progressBar"
-                  style="?android:attr/progressBarStyleHorizontal"
-                  android:layout_width="match_parent"
-                  android:layout_height="3dp"
-                  android:max="100"
-                  android:progress="0"
-                  android:indeterminate="false"/>
-              <TextView
-                  android:id="@+id/statusText"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:padding="8dp"
-                  android:text="جارٍ الاتصال بخدمة يمن نت الرسمية…"
-                  android:textColor="#FFFFFF"
-                  android:background="#1F2937"
-                  android:textSize="13sp"/>
-              <WebView
-                  android:id="@+id/officialWebView"
-                  android:layout_width="match_parent"
-                  android:layout_height="0dp"
-                  android:layout_weight="1"/>
+              </androidx.cardview.widget.CardView>
           </LinearLayout>
           EOF
 
